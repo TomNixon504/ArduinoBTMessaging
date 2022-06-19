@@ -8,72 +8,100 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
-private const val TAG = "MY_APP_DEBUG_TAG"
-
+private const val TAG = "DEBUG_TAG"
 // Defines several constants used when transmitting messages between the
 // service and the UI.
-const val MESSAGE_READ: Int = 0
-const val MESSAGE_WRITE: Int = 1
-const val MESSAGE_TOAST: Int = 2
-// ... (Add other message types here as needed.)
+const val MESSAGE_RECEIVED: Int = 0
+const val MESSAGE_SENDING: Int = 1
+const val CREATE_TOAST: Int = 2
 
 class BluetoothService(private val handler: Handler) {
 
+    private lateinit var thread: ConnectedThread
+
+    fun start(mmSocket: BluetoothSocket) {
+        thread = ConnectedThread(mmSocket)
+        thread.start()
+    }
+
+    fun send(data: Int) {
+        thread.send(data)
+    }
+
+    fun stop() {
+        thread.cancel()
+    }
+
+    /**
+     * The thread that allows the BluetoothService to run in the background
+     * @param mmSocket - the socket of the connected bluetooth device
+     */
     private inner class ConnectedThread(private val mmSocket: BluetoothSocket) : Thread() {
 
-        private val mmInStream: InputStream = mmSocket.inputStream
-        private val mmOutStream: OutputStream = mmSocket.outputStream
-        private val mmBuffer: ByteArray = ByteArray(1024) // mmBuffer store for the stream
+        private val bluetoothInStream: InputStream = mmSocket.inputStream
+        private val bluetoothOutStream: OutputStream = mmSocket.outputStream
+        private val inputBuffer: ByteArray = ByteArray(1024)
 
+        /**
+         * Runs the constant input listening
+         */
         override fun run() {
-            var numBytes: Int // bytes returned from read()
+            var inCount: Int
 
-            // Keep listening to the InputStream until an exception occurs.
+            // Always checking for bluetooth input from the connected device
             while (true) {
                 // Read from the InputStream.
-                numBytes = try { mmInStream.read(mmBuffer) }
-                catch (e: IOException) {
-                    Log.d(TAG, "Input stream was disconnected", e)
+                inCount = try {
+                    bluetoothInStream.read(inputBuffer)
+                } catch (e: IOException) {
+                    Log.d(TAG, "Error: Input stream disconnected", e)
                     break
                 }
 
                 // Send the obtained bytes to the UI activity.
-                val readMsg = handler.obtainMessage(
-                    MESSAGE_READ, numBytes, -1,
-                    mmBuffer)
-                readMsg.sendToTarget()
+                val input = handler.obtainMessage(
+                    MESSAGE_RECEIVED, inCount, -1,
+                    inputBuffer)
+                input.sendToTarget()
             }
         }
 
-        // Call this from the main activity to send data to the remote device.
-        fun write(bytes: ByteArray) {
+        /**
+         * Sends data to the connected bluetooth device
+         *      Call from the main activity
+         * @param data - an Int containing the ASCII code for the char sent
+         */
+        fun send(data: Int) {
             try {
-                mmOutStream.write(bytes)
+                bluetoothOutStream.write(data)
             } catch (e: IOException) {
-                Log.e(TAG, "Error occurred when sending data", e)
+                Log.e(TAG, "Error: Could not send data", e)
 
                 // Send a failure message back to the activity.
-                val writeErrorMsg = handler.obtainMessage(MESSAGE_TOAST)
+                val errorMessage = handler.obtainMessage(CREATE_TOAST)
                 val bundle = Bundle().apply {
-                    putString("toast", "Couldn't send data to the other device")
+                    putString("toast", "Error: Could not send data")
                 }
-                writeErrorMsg.data = bundle
-                handler.sendMessage(writeErrorMsg)
+                errorMessage.data = bundle
+                handler.sendMessage(errorMessage)
                 return
             }
 
             // Share the sent message with the UI activity.
-            val writtenMsg = handler.obtainMessage(
-                MESSAGE_WRITE, -1, -1, mmBuffer)
-            writtenMsg.sendToTarget()
+            val sentData = handler.obtainMessage(
+                MESSAGE_SENDING, -1, -1, inputBuffer)
+            sentData.sendToTarget()
         }
 
-        // Call this method from the main activity to shut down the connection.
+        /**
+         * Cancels the bluetooth connection
+         *      Call from the main activity
+         */
         fun cancel() {
             try {
                 mmSocket.close()
             } catch (e: IOException) {
-                Log.e(TAG, "Could not close the connect socket", e)
+                Log.e(TAG, "Error: Could not close socket", e)
             }
         }
     }

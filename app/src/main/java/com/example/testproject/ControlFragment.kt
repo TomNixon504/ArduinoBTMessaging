@@ -7,9 +7,13 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
@@ -20,31 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.getSystemService
 import androidx.fragment.app.Fragment
 import com.example.testproject.databinding.FragmentControlBinding
-import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.*
-
-
-// Code to request to enable bluetooth
-private const val REQUEST_ENABLE_BT = 1
-// Coded bytes for interpreting data sent and received
-private const val SW1_CLOSED = 0x41 // 'A'
-private const val SW1_OPEN = 0x45 // 'E'
-private const val SW2_CLOSED = 0x42 // 'B'
-private const val SW2_OPEN = 0x46 // 'F'
-private const val REQUEST_LED1_ON = 0x4A // 'J'
-private const val CONFIRM_LED1_ON = 0x4B // 'K'
-private const val REQUEST_LED1_OFF = 0x4C // 'L'
-private const val CONFIRM_LED1_OFF = 0x4D // 'M'
-private const val REQUEST_LED2_ON = 0x4E // 'N'
-private const val CONFIRM_LED2_ON = 0x4F // 'O'
-private const val REQUEST_LED2_OFF = 0x50 // 'P'
-private const val CONFIRM_LED2_OFF = 0x51 // 'Q'
-private const val REQUEST_PASS_ON = 0x01 // 'SOH' - Start of Heading
-private const val CONFIRM_PASS_ON = 0x02 // 'STX' - Start of Text
-private const val REQUEST_PASS_OFF = 0x04 // 'EOT' - End of Transmission
-private const val CONFIRM_PASS_OFF = 0x03 // 'ETX' - End of Text
 
 /**
  * A simple [Fragment] subclass as the default destination in the navigation.
@@ -64,20 +44,21 @@ class ControlFragment : Fragment() {
     // Bluetooth management
     private lateinit var mmDevice : BluetoothDevice
     private lateinit var mmSocket : BluetoothSocket
-    private lateinit var mmOutputStream : OutputStream
-    private lateinit var mmInputStream : InputStream
     private var stopWorker = false
     private var commsError = false
     // If a bluetooth device has been connected
     private var connected = false
     // The name of the default connection
-    private var deviceName : String? = "H-C-2010-06-01"
+    private var deviceName : String = "H-C-2010-06-01"
 
     private var _binding: FragmentControlBinding? = null
 
     // This property is only valid between onCreateView and
     // onDestroyView.
     private val binding get() = _binding!!
+
+    private lateinit var bluetoothService: BluetoothService
+    private val receiver: BroadcastReceiver = BluetoothBroadcastReceiver()
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -92,20 +73,23 @@ class ControlFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION).apply {
+            addAction(Constants.ACTION_RECEIVE_BLUETOOTH)
+        }
+        
+
         // Sets up bluetooth if possible on the device
         bluetoothSetUp()
-        // Resets the booleans and turns off all lights on the arduino
-        resetToDefault()
 
         binding.passthroughButton.setOnClickListener {
             passRequested = true
             if(passEnabled) {
-                bluetoothSend(REQUEST_PASS_OFF)
-                bluetoothSend(REQUEST_PASS_OFF)
+                bluetoothSend(Constants.CODE_REQUEST_PASS_OFF)
+                bluetoothSend(Constants.CODE_REQUEST_PASS_OFF)
             }
             else {
-                bluetoothSend(REQUEST_PASS_ON)
-                bluetoothSend(REQUEST_PASS_ON)
+                bluetoothSend(Constants.CODE_REQUEST_PASS_ON)
+                bluetoothSend(Constants.CODE_REQUEST_PASS_ON)
             }
         }
         binding.SW1Button.setOnClickListener {
@@ -120,22 +104,22 @@ class ControlFragment : Fragment() {
             led1Requested = true
             if(led1Enabled) {
                 // Sends a request to turn LED#1 off
-                bluetoothSend(REQUEST_LED1_OFF)
+                bluetoothSend(Constants.CODE_REQUEST_LED1_OFF)
             }
             else {
                 // Sends a request to turn LED#1 off
-                bluetoothSend(REQUEST_LED1_ON)
+                bluetoothSend(Constants.CODE_REQUEST_LED1_ON)
             }
         }
         binding.LED2Button.setOnClickListener {
             led2Requested = true
             if(led1Enabled) {
                 // Sends a request to turn LED#2 off
-                bluetoothSend(REQUEST_LED2_OFF)
+                bluetoothSend(Constants.CODE_REQUEST_LED2_OFF)
             }
             else {
                 // Sends a request to turn LED#2 off
-                bluetoothSend(REQUEST_LED2_ON)
+                bluetoothSend(Constants.CODE_REQUEST_LED2_ON)
             }
         }
 
@@ -170,7 +154,8 @@ class ControlFragment : Fragment() {
 
         if(connected) {
             bluetoothCommunication()
-            bluetoothReceiveData()
+            bluetoothService = BluetoothService(Handler(Looper.getMainLooper()))
+            bluetoothService.start(mmSocket)
         }
     }
 
@@ -185,7 +170,7 @@ class ControlFragment : Fragment() {
             return
         }
         else {
-            mmOutputStream.write(code)
+            bluetoothService.send(code)
             binding.textSendRecieve.append(code.toChar().toString())
         }
     }
@@ -202,7 +187,11 @@ class ControlFragment : Fragment() {
         }
         else if (passEnabled) {
             val message = str.toByteArray()
-            mmOutputStream.write(message)
+
+            for (byte in message) {
+                bluetoothService.send(byte.toInt())
+            }
+
             binding.textSendRecieve.append(str)
             Toast.makeText(requireContext(), "Sending Data", Toast.LENGTH_SHORT).show()
         }
@@ -217,8 +206,7 @@ class ControlFragment : Fragment() {
         if(connected) {
             stopWorker = true
 
-            mmOutputStream.close()
-            mmInputStream.close()
+            bluetoothService.stop()
             mmSocket.close()
         }
     }
@@ -238,7 +226,7 @@ class ControlFragment : Fragment() {
                 ActivityCompat.requestPermissions(
                     requireActivity(),
                     arrayOf(Manifest.permission.BLUETOOTH, Manifest.permission.BLUETOOTH_ADMIN),
-                    REQUEST_ENABLE_BT
+                    Constants.REQUEST_ENABLE_BT
                 )
             }
         }
@@ -294,54 +282,77 @@ class ControlFragment : Fragment() {
         val uuid: UUID = mmDevice.uuids[0].uuid
         mmSocket = mmDevice.createRfcommSocketToServiceRecord(uuid)
         mmSocket.connect()
-        mmOutputStream = mmSocket.outputStream
-        mmInputStream = mmSocket.inputStream
     }
 
-    private fun bluetoothReceiveData() {
-        stopWorker = false
-        val workerThread = Thread {
-            Looper.prepare()
-            Toast.makeText(requireContext(), "Starting Thread", Toast.LENGTH_SHORT).show()
-            while (!Thread.currentThread().isInterrupted && !stopWorker) {
-                try {
-                    val input = mmInputStream.readBytes()
-                    Toast.makeText(requireContext(), "Receiving Data", Toast.LENGTH_SHORT).show()
+//    private fun bluetoothReceiveData() {
+//
+//        val bluetoothReceiverThread = Thread {
+//            fun run() {
+//                val buffer = ByteArray(1024)
+//                var numBytes: Int
+//                while (!Thread.currentThread().isInterrupted && stopWorker) {
+//                    try {
+//                        if (mmInputStream.available() != 0) {
+//                            try {
+//                                numBytes = mmInputStream.read(buffer)
+//                                for (i in 0..numBytes) {
+//                                    processData(buffer[i])
+//                                    displayChanges()
+//                                    binding.textSendRecieve.append(buffer[i].toInt().toString())
+//                                }
+//                            } catch (ex: IOException) {
+//                                stopWorker = true
+//                            }
+//                        }
+//                    } catch (ex: IOException) {
+//                        stopWorker = true
+//                    }
+//                }
+//            }
+//        }
+//
+//        bluetoothReceiverThread.start()
 
-                    for (i in input.indices) {
-                        val b = input[i]
-                        processData(b)
-                        displayChanges()
-                        binding.textSendRecieve.append(b.toInt().toString())
-                    }
-                    Toast.makeText(requireContext(), "Parsed Data", Toast.LENGTH_SHORT).show()
-                } catch (ex: IOException) {
-                    stopWorker = true
-                }
-            }
-            Toast.makeText(requireContext(), "Exiting Thread", Toast.LENGTH_SHORT).show()
-        }
-        workerThread.start()
-    }
+//        stopWorker = false
+//        val workerThread = Thread {
+//            Looper.prepare()
+//            while (!Thread.currentThread().isInterrupted && !stopWorker) {
+//                try {
+//                    val input = mmInputStream.readBytes()
+//                    for (i in input.indices) {
+//                        val b = input[i]
+//                        requireActivity().runOnUiThread {
+//                            processData(b)
+//                            displayChanges()
+//                        }
+//                        binding.textSendRecieve.append(b.toInt().toString())
+//                    }
+//                } catch (ex: IOException) {
+//                    stopWorker = true
+//                }
+//            }
+//        }
+//        workerThread.start()
+//    }
 
     private fun processData(byte: Byte) {
 
         when(byte.toInt()) {
-            SW1_CLOSED -> {
+            Constants.CODE_SW1_CLOSED -> {
                 sw1Enabled = false
             }
-            SW1_OPEN -> {
+            Constants.CODE_SW1_OPEN -> {
                 sw1Enabled = true
             }
 
-            SW2_CLOSED -> {
+            Constants.CODE_SW2_CLOSED -> {
                 sw2Enabled = false
             }
-            SW2_OPEN -> {
+            Constants.CODE_SW2_OPEN -> {
                 sw2Enabled = true
             }
 
-            CONFIRM_LED1_ON -> {
+            Constants.CODE_CONFIRM_LED1_ON -> {
                 if (led1Requested) {
                     led1Enabled = true
                     led1Requested = false
@@ -350,7 +361,7 @@ class ControlFragment : Fragment() {
                     led1Requested = false
                 }
             }
-            CONFIRM_LED1_OFF -> {
+            Constants.CODE_CONFIRM_LED1_OFF -> {
                 if (led1Requested) {
                     led1Enabled = false
                     led1Requested = false
@@ -360,7 +371,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            CONFIRM_LED2_ON -> {
+            Constants.CODE_CONFIRM_LED2_ON -> {
                 if (led2Requested) {
                     led2Enabled = true
                     led2Requested = false
@@ -370,7 +381,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            CONFIRM_LED2_OFF -> {
+            Constants.CODE_CONFIRM_LED2_OFF -> {
                 if (led2Requested) {
                     led2Enabled = false
                     led2Requested = false
@@ -380,7 +391,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            CONFIRM_PASS_ON -> {
+            Constants.CODE_CONFIRM_PASS_ON -> {
                 if (passRequested) {
                     passEnabled = true
                     passRequested = false
@@ -390,7 +401,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            CONFIRM_PASS_OFF -> {
+            Constants.CODE_CONFIRM_PASS_OFF -> {
                 if (passRequested) {
                     passEnabled = false
                     passRequested = false
@@ -456,21 +467,5 @@ class ControlFragment : Fragment() {
         dialog.setNegativeButton("OK", null)
         val alertDialog = dialog.create()
         alertDialog.show()
-    }
-
-    private fun resetToDefault() {
-        led1Enabled = false
-        led2Enabled = false
-        sw1Enabled = false
-        sw2Enabled = false
-        passEnabled = false
-
-        led1Requested = true
-        mmOutputStream.write(REQUEST_LED1_OFF)
-        led2Requested = true
-        mmOutputStream.write(REQUEST_LED2_OFF)
-        passRequested = true
-        mmOutputStream.write(REQUEST_PASS_OFF)
-        mmOutputStream.write(REQUEST_PASS_OFF)
     }
 }
