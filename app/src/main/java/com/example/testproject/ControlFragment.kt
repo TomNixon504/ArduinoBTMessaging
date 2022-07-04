@@ -7,14 +7,12 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
-import android.content.BroadcastReceiver
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -24,6 +22,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.getSystemService
 import androidx.fragment.app.Fragment
 import com.example.testproject.databinding.FragmentControlBinding
+import java.io.IOException
+import java.io.OutputStream
+import java.lang.Thread.sleep
 import java.util.*
 
 /**
@@ -52,44 +53,39 @@ class ControlFragment : Fragment() {
     private var deviceName : String = "H-C-2010-06-01"
 
     private var _binding: FragmentControlBinding? = null
-
-    // This property is only valid between onCreateView and
-    // onDestroyView.
+    // This property is only valid between onCreateView and onDestroyView.
     private val binding get() = _binding!!
 
-    private lateinit var bluetoothService: BluetoothService
-    private val receiver: BroadcastReceiver = BluetoothBroadcastReceiver()
+    private lateinit var receiveDataThread: ReceiveDataThread
+    private lateinit var sendDataThread: SendDataThread
+
+    private lateinit var btHandler: Handler
+
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        btHandler = Handler(Looper.getMainLooper())
 
         _binding = FragmentControlBinding.inflate(inflater, container, false)
         return binding.root
-
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION).apply {
-            addAction(Constants.ACTION_RECEIVE_BLUETOOTH)
-        }
-        
-
         // Sets up bluetooth if possible on the device
         bluetoothSetUp()
 
         binding.passthroughButton.setOnClickListener {
             passRequested = true
             if(passEnabled) {
-                bluetoothSend(Constants.CODE_REQUEST_PASS_OFF)
-                bluetoothSend(Constants.CODE_REQUEST_PASS_OFF)
+                bluetoothSend(Constants.REQUEST_PASS_OFF)
+                bluetoothSend(Constants.REQUEST_PASS_OFF)
             }
             else {
-                bluetoothSend(Constants.CODE_REQUEST_PASS_ON)
-                bluetoothSend(Constants.CODE_REQUEST_PASS_ON)
+                bluetoothSend(Constants.REQUEST_PASS_ON)
+                bluetoothSend(Constants.REQUEST_PASS_ON)
             }
         }
         binding.SW1Button.setOnClickListener {
@@ -104,25 +100,26 @@ class ControlFragment : Fragment() {
             led1Requested = true
             if(led1Enabled) {
                 // Sends a request to turn LED#1 off
-                bluetoothSend(Constants.CODE_REQUEST_LED1_OFF)
+                bluetoothSend(Constants.REQUEST_LED1_OFF)
             }
             else {
-                // Sends a request to turn LED#1 off
-                bluetoothSend(Constants.CODE_REQUEST_LED1_ON)
+                // Sends a request to turn LED#1 on
+                bluetoothSend(Constants.REQUEST_LED1_ON)
             }
         }
         binding.LED2Button.setOnClickListener {
             led2Requested = true
-            if(led1Enabled) {
+            if(led2Enabled) {
                 // Sends a request to turn LED#2 off
-                bluetoothSend(Constants.CODE_REQUEST_LED2_OFF)
+                bluetoothSend(Constants.REQUEST_LED2_OFF)
             }
             else {
-                // Sends a request to turn LED#2 off
-                bluetoothSend(Constants.CODE_REQUEST_LED2_ON)
+                // Sends a request to turn LED#2 on
+                bluetoothSend(Constants.REQUEST_LED2_ON)
             }
         }
 
+        // Pass through send
         binding.imageButton2.setOnClickListener {
             bluetoothSend(binding.textInput.text.toString())
         }
@@ -154,11 +151,12 @@ class ControlFragment : Fragment() {
 
         if(connected) {
             bluetoothCommunication()
-            bluetoothService = BluetoothService(Handler(Looper.getMainLooper()))
-            bluetoothService.start(mmSocket)
+            receiveDataThread = ReceiveDataThread(mmSocket)
+            sendDataThread = SendDataThread(mmSocket)
+            receiveDataThread.start()
+            sendDataThread.start()
         }
     }
-
 
     /**
      * Sends bluetooth data in the form of the hex codes
@@ -170,7 +168,7 @@ class ControlFragment : Fragment() {
             return
         }
         else {
-            bluetoothService.send(code)
+            sendDataThread.send(code)
             binding.textSendRecieve.append(code.toChar().toString())
         }
     }
@@ -189,7 +187,7 @@ class ControlFragment : Fragment() {
             val message = str.toByteArray()
 
             for (byte in message) {
-                bluetoothService.send(byte.toInt())
+                sendDataThread.send(byte.toInt())
             }
 
             binding.textSendRecieve.append(str)
@@ -197,8 +195,7 @@ class ControlFragment : Fragment() {
         }
         else {
             Toast.makeText(
-                activity, "Cancelled: Pass Through not enabled", Toast.LENGTH_SHORT)
-                .show()
+                activity, "Cancelled: Pass Through not enabled", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -206,7 +203,8 @@ class ControlFragment : Fragment() {
         if(connected) {
             stopWorker = true
 
-            bluetoothService.stop()
+            sendDataThread.cancel()
+            receiveDataThread.cancel()
             mmSocket.close()
         }
     }
@@ -284,75 +282,92 @@ class ControlFragment : Fragment() {
         mmSocket.connect()
     }
 
-//    private fun bluetoothReceiveData() {
-//
-//        val bluetoothReceiverThread = Thread {
-//            fun run() {
-//                val buffer = ByteArray(1024)
-//                var numBytes: Int
-//                while (!Thread.currentThread().isInterrupted && stopWorker) {
-//                    try {
-//                        if (mmInputStream.available() != 0) {
-//                            try {
-//                                numBytes = mmInputStream.read(buffer)
-//                                for (i in 0..numBytes) {
-//                                    processData(buffer[i])
-//                                    displayChanges()
-//                                    binding.textSendRecieve.append(buffer[i].toInt().toString())
-//                                }
-//                            } catch (ex: IOException) {
-//                                stopWorker = true
-//                            }
-//                        }
-//                    } catch (ex: IOException) {
-//                        stopWorker = true
-//                    }
-//                }
-//            }
-//        }
-//
-//        bluetoothReceiverThread.start()
+    /**
+     * The thread that has control over sending data
+     * @param btSocket - The bluetooth socket to create the outputStream
+     */
+    private inner class SendDataThread(private val btSocket: BluetoothSocket) : Thread() {
+        private val bluetoothOutStream: OutputStream = mmSocket.outputStream
+        /**
+         * Sends data to the connected bluetooth device
+         *      Call from the main activity
+         * @param data - an Int containing the ASCII code for the char sent
+         */
+        fun send(data: Int) {
+            try {
+                bluetoothOutStream.write(data)
+            } catch (e: IOException) {
+                btHandler.post {
+                    communicationError()
+                }
+                return
+            }
+        }
+        /**
+         * Cancels the bluetooth connection
+         */
+        fun cancel() {
+            try {
+                mmSocket.close()
+            } catch (e: IOException) {
+                Log.e(Constants.TAG, "Error: Could not close socket", e)
+            }
+        }
 
-//        stopWorker = false
-//        val workerThread = Thread {
-//            Looper.prepare()
-//            while (!Thread.currentThread().isInterrupted && !stopWorker) {
-//                try {
-//                    val input = mmInputStream.readBytes()
-//                    for (i in input.indices) {
-//                        val b = input[i]
-//                        requireActivity().runOnUiThread {
-//                            processData(b)
-//                            displayChanges()
-//                        }
-//                        binding.textSendRecieve.append(b.toInt().toString())
-//                    }
-//                } catch (ex: IOException) {
-//                    stopWorker = true
-//                }
-//            }
-//        }
-//        workerThread.start()
-//    }
+    }
+
+    /**
+     * The thread that has control over the constant listening for received bluetooth data
+     * @param btSocket - The bluetooth socket to create the inputStream
+     */
+    private inner class ReceiveDataThread(private val btSocket: BluetoothSocket) : Thread() {
+        /**
+         * Runs the constant input listening and processing
+         */
+        override fun run() {
+            val inputStream = btSocket.inputStream
+            val buffer = ByteArray(1024)
+            var bytes = 0
+            while (true) {
+                try {
+                    bytes = inputStream.read(buffer, bytes, 1024 - bytes)
+
+                    for (i in 0 until bytes) {
+                        btHandler.post {
+                            processData(buffer[i])
+                            displayChanges()
+                            binding.textSendRecieve.append(buffer[i].toInt().toChar().toString() + "\n")
+                        }
+                    }
+
+                    bytes = 0
+                } catch (e :IOException) {
+                    break
+                }
+            }
+        }
+        /**
+         * Cancels the bluetooth connection
+         */
+        fun cancel() {
+            try {
+                mmSocket.close()
+            } catch (e: IOException) {
+                Log.e(Constants.TAG, "Error: Could not close socket", e)
+            }
+        }
+    }
 
     private fun processData(byte: Byte) {
 
         when(byte.toInt()) {
-            Constants.CODE_SW1_CLOSED -> {
-                sw1Enabled = false
-            }
-            Constants.CODE_SW1_OPEN -> {
-                sw1Enabled = true
-            }
+            Constants.SW1_CLOSED -> { sw1Enabled = false }
+            Constants.SW1_OPEN -> { sw1Enabled = true }
 
-            Constants.CODE_SW2_CLOSED -> {
-                sw2Enabled = false
-            }
-            Constants.CODE_SW2_OPEN -> {
-                sw2Enabled = true
-            }
+            Constants.SW2_CLOSED -> { sw2Enabled = false }
+            Constants.SW2_OPEN -> { sw2Enabled = true }
 
-            Constants.CODE_CONFIRM_LED1_ON -> {
+            Constants.CONFIRM_LED1_ON -> {
                 if (led1Requested) {
                     led1Enabled = true
                     led1Requested = false
@@ -361,7 +376,7 @@ class ControlFragment : Fragment() {
                     led1Requested = false
                 }
             }
-            Constants.CODE_CONFIRM_LED1_OFF -> {
+            Constants.CONFIRM_LED1_OFF -> {
                 if (led1Requested) {
                     led1Enabled = false
                     led1Requested = false
@@ -371,7 +386,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            Constants.CODE_CONFIRM_LED2_ON -> {
+            Constants.CONFIRM_LED2_ON -> {
                 if (led2Requested) {
                     led2Enabled = true
                     led2Requested = false
@@ -381,7 +396,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            Constants.CODE_CONFIRM_LED2_OFF -> {
+            Constants.CONFIRM_LED2_OFF -> {
                 if (led2Requested) {
                     led2Enabled = false
                     led2Requested = false
@@ -391,7 +406,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            Constants.CODE_CONFIRM_PASS_ON -> {
+            Constants.CONFIRM_PASS_ON -> {
                 if (passRequested) {
                     passEnabled = true
                     passRequested = false
@@ -401,7 +416,7 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            Constants.CODE_CONFIRM_PASS_OFF -> {
+            Constants.CONFIRM_PASS_OFF -> {
                 if (passRequested) {
                     passEnabled = false
                     passRequested = false
@@ -412,11 +427,9 @@ class ControlFragment : Fragment() {
                 }
             }
 
-            else -> {
-                communicationError()
-            }
+            else -> { communicationError() }
         }
-
+        commsError = false
     }
 
     private fun displayChanges() {
@@ -458,14 +471,42 @@ class ControlFragment : Fragment() {
             }
         }
     }
-
     private fun communicationError() {
         //TODO: figure out what to do on communication error
+        commsError = true
+        blinkLED()
         val dialog: AlertDialog.Builder = AlertDialog.Builder(context)
         dialog.setMessage("Communications Error between the Arduino and the phone")
         dialog.setTitle("IO ERROR")
         dialog.setNegativeButton("OK", null)
         val alertDialog = dialog.create()
         alertDialog.show()
+    }
+
+    /**
+     * Flashes the LEDs twice with a 1/2 second wait in-between
+     */
+    private fun blinkLED() {
+
+        sendDataThread.send(Constants.REQUEST_LED1_OFF)
+        sendDataThread.send(Constants.REQUEST_LED2_OFF)
+
+        sendDataThread.send(Constants.REQUEST_LED1_ON)
+        sendDataThread.send(Constants.REQUEST_LED2_ON)
+
+        sleep(500)
+
+        sendDataThread.send(Constants.REQUEST_LED1_OFF)
+        sendDataThread.send(Constants.REQUEST_LED2_OFF)
+
+        sleep(500)
+
+        sendDataThread.send(Constants.REQUEST_LED1_ON)
+        sendDataThread.send(Constants.REQUEST_LED2_ON)
+
+        sleep(500)
+
+        sendDataThread.send(Constants.REQUEST_LED1_OFF)
+        sendDataThread.send(Constants.REQUEST_LED2_OFF)
     }
 }

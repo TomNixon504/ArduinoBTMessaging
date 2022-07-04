@@ -53,11 +53,6 @@
             android:layout_height="match_parent"
             android:orientation="horizontal">
 
-            <Space
-                android:layout_width="10dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="0" />
-
             <EditText
                 android:id="@+id/textInput"
                 android:layout_width="wrap_content"
@@ -80,10 +75,6 @@
                 tools:ignore="SpeakableTextPresentCheck" />
 
         </LinearLayout>
-
-        <Space
-            android:layout_width="match_parent"
-            android:layout_height="20dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -115,10 +106,6 @@
                 android:text="@string/passthrough"
                 android:textColor="#FFFFFF" />
         </LinearLayout>
-
-        <Space
-            android:layout_width="match_parent"
-            android:layout_height="20dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -152,7 +139,7 @@
             <Button
                 android:id="@+id/SW1_Button"
                 style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:backgroundTint="#474747"
@@ -162,17 +149,13 @@
             <Button
                 android:id="@+id/SW2_Button"
                 style="?android:attr/buttonBarButtonStyle"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:backgroundTint="#474747"
                 android:text="@string/sw_2"
                 android:textColor="#FFFFFF" />
         </LinearLayout>
-
-        <Space
-            android:layout_width="match_parent"
-            android:layout_height="20dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
