@@ -7,7 +7,9 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import android.content.DialogInterface
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
@@ -21,11 +23,15 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.getSystemService
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.activityViewModels
+import androidx.navigation.fragment.NavHostFragment
+import androidx.preference.PreferenceManager
 import com.example.testproject.databinding.FragmentControlBinding
 import java.io.IOException
 import java.io.OutputStream
 import java.lang.Thread.sleep
 import java.util.*
+import kotlin.collections.ArrayList
 
 /**
  * A simple [Fragment] subclass as the default destination in the navigation.
@@ -47,10 +53,16 @@ class ControlFragment : Fragment() {
     private lateinit var mmSocket : BluetoothSocket
     private var stopWorker = false
     private var commsError = false
-    // If a bluetooth device has been connected
+    // If a bluetooth device has been connected/paired
     private var connected = false
+    private var paired = false
     // The name of the default connection
-    private var deviceName : String = "H-C-2010-06-01"
+    private lateinit var deviceName : String
+    private lateinit var deviceAddress: String
+
+    private val viewModel: ItemViewModel by activityViewModels()
+    private var pairedDevices = ArrayList<BluetoothDevice>()
+    private lateinit var bluetoothDevice: SharedPreferences
 
     private var _binding: FragmentControlBinding? = null
     // This property is only valid between onCreateView and onDestroyView.
@@ -61,13 +73,14 @@ class ControlFragment : Fragment() {
 
     private lateinit var btHandler: Handler
 
-
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
         btHandler = Handler(Looper.getMainLooper())
-
+        bluetoothDevice = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        deviceName = bluetoothDevice.getString("device_name", "0").toString()
+        deviceAddress = bluetoothDevice.getString("device_address", "0").toString()
         _binding = FragmentControlBinding.inflate(inflater, container, false)
         return binding.root
     }
@@ -125,9 +138,16 @@ class ControlFragment : Fragment() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        deviceName = bluetoothDevice.getString("device_name", "0").toString()
+        deviceAddress = bluetoothDevice.getString("device_address", "0").toString()
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         bluetoothClose()
+        viewModel.clearList()
         _binding = null
     }
 
@@ -149,12 +169,22 @@ class ControlFragment : Fragment() {
 
         bluetoothConnect(bluetoothAdapter!!)
 
-        if(connected) {
+        if(paired) {
             bluetoothCommunication()
-            receiveDataThread = ReceiveDataThread(mmSocket)
-            sendDataThread = SendDataThread(mmSocket)
-            receiveDataThread.start()
-            sendDataThread.start()
+            if (connected) {
+                receiveDataThread = ReceiveDataThread(mmSocket)
+                sendDataThread = SendDataThread(mmSocket)
+                receiveDataThread.start()
+                sendDataThread.start()
+            }
+            else {
+                val dialog: AlertDialog.Builder = AlertDialog.Builder(context)
+                dialog.setMessage("Could not connect to device $deviceName")
+                dialog.setTitle("Connection Failed")
+                dialog.setNegativeButton("OK", null)
+                val alertDialog = dialog.create()
+                alertDialog.show()
+            }
         }
     }
 
@@ -249,27 +279,31 @@ class ControlFragment : Fragment() {
 
     @SuppressLint("MissingPermission")
     private fun bluetoothConnect(bluetoothAdapter: BluetoothAdapter) {
+        viewModel.selectList(bluetoothAdapter)
         val bluetoothDevices = bluetoothAdapter.bondedDevices
 
         if (bluetoothDevices.isNotEmpty()) {
             for (device in bluetoothDevices) {
                 // Automatically connects to the previously connected device
                 //      unless it isn't currently paired
-                if (device.name == deviceName) {
+                if (device.name == deviceName && device.address == deviceAddress) {
                     mmDevice = device
-                    connected = true
-                    Toast.makeText(requireContext(), "Bluetooth Device Found", Toast.LENGTH_LONG).show()
-                    break
+                    paired = true
                 }
+                pairedDevices.add(device)
             }
         }
-        if(!connected) {
+
+        if(!paired) {
             // Alert that tells the user to connect to a bluetooth device
             //      only if there are no paired devices
             val dialog: AlertDialog.Builder = AlertDialog.Builder(context)
-            dialog.setMessage("No possible connections\nPlease connect to a device")
-            dialog.setTitle("No Devices Found")
-            dialog.setNegativeButton("OK", null)
+            dialog.setMessage("Could not find selected device.\nPlease select another device")
+            dialog.setTitle("Device Not Found")
+            dialog.setNegativeButton("OK") { _, _ ->
+                NavHostFragment.findNavController(this)
+                    .navigate(R.id.action_FirstFragment_to_SecondFragment)
+            }
             val alertDialog = dialog.create()
             alertDialog.show()
         }
@@ -279,7 +313,12 @@ class ControlFragment : Fragment() {
     private fun bluetoothCommunication() {
         val uuid: UUID = mmDevice.uuids[0].uuid
         mmSocket = mmDevice.createRfcommSocketToServiceRecord(uuid)
-        mmSocket.connect()
+        connected = try {
+            mmSocket.connect()
+            true
+        } catch (e : Exception) {
+            false
+        }
     }
 
     /**
@@ -334,9 +373,10 @@ class ControlFragment : Fragment() {
 
                     for (i in 0 until bytes) {
                         btHandler.post {
-                            processData(buffer[i])
+                            processData(buffer[i].toInt())
                             displayChanges()
-                            binding.textSendRecieve.append(buffer[i].toInt().toChar().toString() + "\n")
+                            binding.textSendRecieve.append(buffer[i].toInt().toChar().toString())
+                            if(!passEnabled) { binding.textSendRecieve.append("\n") }
                         }
                     }
 
@@ -358,65 +398,72 @@ class ControlFragment : Fragment() {
         }
     }
 
-    private fun processData(byte: Byte) {
+    /**
+     * Processes all incoming data from the arduino
+     */
+    private fun processData(code: Int) {
+        if(!passEnabled && !commsError) {
+            when(code) {
+                Constants.SW1_CLOSED -> { sw1Enabled = false }
+                Constants.SW1_OPEN -> { sw1Enabled = true }
 
-        when(byte.toInt()) {
-            Constants.SW1_CLOSED -> { sw1Enabled = false }
-            Constants.SW1_OPEN -> { sw1Enabled = true }
+                Constants.SW2_CLOSED -> { sw2Enabled = false }
+                Constants.SW2_OPEN -> { sw2Enabled = true }
 
-            Constants.SW2_CLOSED -> { sw2Enabled = false }
-            Constants.SW2_OPEN -> { sw2Enabled = true }
-
-            Constants.CONFIRM_LED1_ON -> {
-                if (led1Requested) {
-                    led1Enabled = true
-                    led1Requested = false
-                } else {
-                    communicationError()
-                    led1Requested = false
+                Constants.CONFIRM_LED1_ON -> {
+                    if (led1Requested) {
+                        led1Enabled = true
+                        led1Requested = false
+                    } else {
+                        communicationError()
+                        led1Requested = false
+                    }
                 }
-            }
-            Constants.CONFIRM_LED1_OFF -> {
-                if (led1Requested) {
-                    led1Enabled = false
-                    led1Requested = false
-                } else {
-                    communicationError()
-                    led1Requested = false
+                Constants.CONFIRM_LED1_OFF -> {
+                    if (led1Requested) {
+                        led1Enabled = false
+                        led1Requested = false
+                    } else {
+                        communicationError()
+                        led1Requested = false
+                    }
                 }
-            }
 
-            Constants.CONFIRM_LED2_ON -> {
-                if (led2Requested) {
-                    led2Enabled = true
-                    led2Requested = false
-                } else {
-                    communicationError()
-                    led2Requested = false
+                Constants.CONFIRM_LED2_ON -> {
+                    if (led2Requested) {
+                        led2Enabled = true
+                        led2Requested = false
+                    } else {
+                        communicationError()
+                        led2Requested = false
+                    }
                 }
-            }
 
-            Constants.CONFIRM_LED2_OFF -> {
-                if (led2Requested) {
-                    led2Enabled = false
-                    led2Requested = false
-                } else {
-                    communicationError()
-                    led2Requested = false
+                Constants.CONFIRM_LED2_OFF -> {
+                    if (led2Requested) {
+                        led2Enabled = false
+                        led2Requested = false
+                    } else {
+                        communicationError()
+                        led2Requested = false
+                    }
                 }
-            }
 
-            Constants.CONFIRM_PASS_ON -> {
-                if (passRequested) {
-                    passEnabled = true
-                    passRequested = false
-                } else {
-                    communicationError()
-                    passRequested = false
+                Constants.CONFIRM_PASS_ON -> {
+                    if (passRequested) {
+                        passEnabled = true
+                        passRequested = false
+                    } else {
+                        communicationError()
+                        passRequested = false
+                    }
                 }
-            }
 
-            Constants.CONFIRM_PASS_OFF -> {
+                else -> { communicationError() }
+            }
+        }
+        else if(!commsError) {
+            if (code == Constants.CONFIRM_PASS_OFF) {
                 if (passRequested) {
                     passEnabled = false
                     passRequested = false
@@ -426,12 +473,13 @@ class ControlFragment : Fragment() {
                     passRequested = false
                 }
             }
-
-            else -> { communicationError() }
         }
-        commsError = false
+
     }
 
+    /**
+     * Displays changes in UI status due to confirmation from Arduino
+     */
     private fun displayChanges() {
         if(!commsError) {
             if(led1Enabled) {
@@ -471,14 +519,18 @@ class ControlFragment : Fragment() {
             }
         }
     }
+
+    /**
+     * The process of notifying the user that their has been a communications error
+     *      between the phone and arduino
+     */
     private fun communicationError() {
-        //TODO: figure out what to do on communication error
         commsError = true
         blinkLED()
         val dialog: AlertDialog.Builder = AlertDialog.Builder(context)
         dialog.setMessage("Communications Error between the Arduino and the phone")
         dialog.setTitle("IO ERROR")
-        dialog.setNegativeButton("OK", null)
+        dialog.setNegativeButton("OK") { _, _ -> commsError = false }
         val alertDialog = dialog.create()
         alertDialog.show()
     }

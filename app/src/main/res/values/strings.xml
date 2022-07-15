@@ -71,4 +71,5 @@
     <string name="led1_indicator">LED1 Indicator</string>
     <string name="hint">hint</string>
     <string name="sends_data">sends data</string>
+    <string name="title_activity_settings">SettingsActivity</string>
 </resources>
