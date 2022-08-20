@@ -12,7 +12,6 @@ import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
-import androidx.navigation.findNavController
 import androidx.navigation.fragment.NavHostFragment.Companion.findNavController
 import androidx.preference.PreferenceManager
 import com.example.testproject.databinding.FragmentDeviceListBinding
@@ -32,7 +31,7 @@ class DeviceListFragment : Fragment() {
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
-    ): View? {
+    ): View {
         try {
             for (device in viewModel.currentList.value?.bondedDevices!!) {
                 pairedDevices.add(device)
@@ -55,7 +54,13 @@ class DeviceListFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, pairedDevices)
+        val names = ArrayList<String>()
+
+        for (device in pairedDevices) {
+            names.add(device.name)
+        }
+
+        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, names)
         binding.deviceList.adapter = adapter
 
         binding.deviceList.onItemClickListener = AdapterView.OnItemClickListener{_, _, position, _ ->

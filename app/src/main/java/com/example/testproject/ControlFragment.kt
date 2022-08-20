@@ -7,7 +7,6 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
-import android.content.DialogInterface
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -70,6 +69,7 @@ class ControlFragment : Fragment() {
 
     private lateinit var receiveDataThread: ReceiveDataThread
     private lateinit var sendDataThread: SendDataThread
+    private lateinit var timeOutThread: TimeOutThread
 
     private lateinit var btHandler: Handler
 
@@ -89,6 +89,9 @@ class ControlFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         // Sets up bluetooth if possible on the device
         bluetoothSetUp()
+
+        timeOutThread = TimeOutThread()
+        timeOutThread.start()
 
         binding.passthroughButton.setOnClickListener {
             passRequested = true
@@ -131,7 +134,6 @@ class ControlFragment : Fragment() {
                 bluetoothSend(Constants.REQUEST_LED2_ON)
             }
         }
-
         // Pass through send
         binding.imageButton2.setOnClickListener {
             bluetoothSend(binding.textInput.text.toString())
@@ -139,9 +141,9 @@ class ControlFragment : Fragment() {
     }
 
     override fun onResume() {
-        super.onResume()
         deviceName = bluetoothDevice.getString("device_name", "0").toString()
         deviceAddress = bluetoothDevice.getString("device_address", "0").toString()
+        super.onResume()
     }
 
     override fun onDestroyView() {
@@ -152,25 +154,23 @@ class ControlFragment : Fragment() {
     }
 
     /**
-     * Sets up bluetooth
+     * Sets up bluetooth by creating a bluetooth socket and colling related functions
      */
     @SuppressLint("MissingPermission")
     private fun bluetoothSetUp() {
         bluetoothEnable()
-
         val bluetoothManager = getSystemService(requireContext(), BluetoothManager::class.java)
         val bluetoothAdapter = bluetoothManager?.adapter
-
         // If the adapter is null the device doesn't support bluetooth
         if(!bluetoothActivate(bluetoothAdapter)) {
             Toast.makeText(requireContext(),"This device doesn't support Bluetooth", Toast.LENGTH_LONG).show()
             return
         }
 
-        bluetoothConnect(bluetoothAdapter!!)
+        bluetoothPairDevice(bluetoothAdapter!!)
 
         if(paired) {
-            bluetoothCommunication()
+            bluetoothConnect()
             if (connected) {
                 receiveDataThread = ReceiveDataThread(mmSocket)
                 sendDataThread = SendDataThread(mmSocket)
@@ -190,6 +190,7 @@ class ControlFragment : Fragment() {
 
     /**
      * Sends bluetooth data in the form of the hex codes
+     *      Only used when pass through is disabled
      * @param code - the Hex code
      */
     private fun bluetoothSend(code: Int) {
@@ -198,6 +199,7 @@ class ControlFragment : Fragment() {
             return
         }
         else {
+            timeOutThread.sentData()
             sendDataThread.send(code)
             binding.textSendRecieve.append(code.toChar().toString())
         }
@@ -215,11 +217,9 @@ class ControlFragment : Fragment() {
         }
         else if (passEnabled) {
             val message = str.toByteArray()
-
             for (byte in message) {
                 sendDataThread.send(byte.toInt())
             }
-
             binding.textSendRecieve.append(str)
             Toast.makeText(requireContext(), "Sending Data", Toast.LENGTH_SHORT).show()
         }
@@ -229,10 +229,12 @@ class ControlFragment : Fragment() {
         }
     }
 
+    /**
+     * Closes all bluetooth communication threads and closes the bluetooth socket
+     */
     private fun bluetoothClose() {
         if(connected) {
             stopWorker = true
-
             sendDataThread.cancel()
             receiveDataThread.cancel()
             mmSocket.close()
@@ -249,7 +251,6 @@ class ControlFragment : Fragment() {
                 Manifest.permission.BLUETOOTH_CONNECT
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-
             if (activity != null) {
                 ActivityCompat.requestPermissions(
                     requireActivity(),
@@ -261,7 +262,7 @@ class ControlFragment : Fragment() {
     }
 
     /**
-     * Checks to see if it is possible to enable bluetooth on the device then enables it
+     * Checks to see if it is possible to enable bluetooth on the device then activates it
      * @param bluetoothAdapter - the devices bluetooth adapter information
      * @return - returns true if bluetooth is active on this device otherwise false
      */
@@ -277,8 +278,12 @@ class ControlFragment : Fragment() {
         return true
     }
 
+    /**
+     * Parses through all paired devices to find the saved device
+     *      if saved device does not exist tells used to select one from DeviceListFragment
+     */
     @SuppressLint("MissingPermission")
-    private fun bluetoothConnect(bluetoothAdapter: BluetoothAdapter) {
+    private fun bluetoothPairDevice(bluetoothAdapter: BluetoothAdapter) {
         viewModel.selectList(bluetoothAdapter)
         val bluetoothDevices = bluetoothAdapter.bondedDevices
 
@@ -309,8 +314,11 @@ class ControlFragment : Fragment() {
         }
     }
 
+    /**
+     * Attempts to connect to the selected bluetooth device
+     */
     @SuppressLint("MissingPermission")
-    private fun bluetoothCommunication() {
+    private fun bluetoothConnect() {
         val uuid: UUID = mmDevice.uuids[0].uuid
         mmSocket = mmDevice.createRfcommSocketToServiceRecord(uuid)
         connected = try {
@@ -352,7 +360,6 @@ class ControlFragment : Fragment() {
                 Log.e(Constants.TAG, "Error: Could not close socket", e)
             }
         }
-
     }
 
     /**
@@ -364,6 +371,7 @@ class ControlFragment : Fragment() {
          * Runs the constant input listening and processing
          */
         override fun run() {
+            //TODO FIX BUG: either here or in the arduino code failure to send/receive coherent data
             val inputStream = btSocket.inputStream
             val buffer = ByteArray(1024)
             var bytes = 0
@@ -375,11 +383,10 @@ class ControlFragment : Fragment() {
                         btHandler.post {
                             processData(buffer[i].toInt())
                             displayChanges()
-                            binding.textSendRecieve.append(buffer[i].toInt().toChar().toString())
+                            if(!commsError) {binding.textSendRecieve.append(buffer[i].toInt().toChar().toString())}
                             if(!passEnabled) { binding.textSendRecieve.append("\n") }
                         }
                     }
-
                     bytes = 0
                 } catch (e :IOException) {
                     break
@@ -399,9 +406,41 @@ class ControlFragment : Fragment() {
     }
 
     /**
+     * Checks to see if the app has received any data in 2 seconds from any data sent
+     */
+    private inner class TimeOutThread : Thread() {
+        //TODO : Creates a bug where you cant receive data
+        var received = false
+
+        fun sentData() {
+            received = false
+//            Timer().schedule(timerTask {
+//                if(!received) {
+//                    communicationError()
+//                }
+//            }, 2000)
+//            val start = LocalTime.now()
+//            while (true) {
+//                if (received) {
+//                    break
+//                }
+//                if (LocalTime.now().toSecondOfDay() - start.toSecondOfDay() >= 200) {
+//                    communicationError()
+//                    break
+//                }
+//            }
+        }
+
+        fun received() {
+            received = true
+        }
+    }
+
+    /**
      * Processes all incoming data from the arduino
      */
     private fun processData(code: Int) {
+        timeOutThread.received()
         if(!passEnabled && !commsError) {
             when(code) {
                 Constants.SW1_CLOSED -> { sw1Enabled = false }
@@ -474,7 +513,6 @@ class ControlFragment : Fragment() {
                 }
             }
         }
-
     }
 
     /**
@@ -536,7 +574,7 @@ class ControlFragment : Fragment() {
     }
 
     /**
-     * Flashes the LEDs twice with a 1/2 second wait in-between
+     * Flashes the LEDs twice with a 1/2 second wait in-between each flash
      */
     private fun blinkLED() {
 

@@ -13,7 +13,6 @@ import com.example.testproject.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
 
-    private var onControlFragment = true
     private lateinit var appBarConfiguration: AppBarConfiguration
     private lateinit var binding: ActivityMainBinding
 
@@ -43,11 +42,14 @@ class MainActivity : AppCompatActivity() {
         // as you specify a parent activity in AndroidManifest.xml.
         return when (item.itemId) {
             R.id.action_settings -> {
-                if(onControlFragment) {
+                try {
                     findNavController(R.id.nav_host_fragment_content_main).navigate(R.id.action_FirstFragment_to_SecondFragment)
-                    onControlFragment = false
+                    true
                 }
-                true
+                catch (e: Exception) {
+                    findNavController(R.id.nav_host_fragment_content_main).navigate(R.id.action_SecondFragment_to_FirstFragment)
+                    false
+                }
             }
             else -> super.onOptionsItemSelected(item)
         }
@@ -55,7 +57,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSupportNavigateUp(): Boolean {
         val navController = findNavController(R.id.nav_host_fragment_content_main)
-        onControlFragment = true
         return navController.navigateUp(appBarConfiguration)
                 || super.onSupportNavigateUp()
     }
